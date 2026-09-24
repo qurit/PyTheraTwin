@@ -176,6 +176,14 @@ class StageProfiler:
     def _iter_process_tree(self) -> List[Any]:
         # Reuse cached Process objects so cpu_percent() history accumulates across
         # samples. children() returns new objects each call — always 0.0 on first use.
+        #
+        # Only return processes already in the cache (established). Newly discovered
+        # processes are primed here so their baseline is set, but excluded from this
+        # sample's CPU measurement. On a system with many short-lived workers (e.g.
+        # OpenGATE), measuring a process sub-milliseconds after priming it causes Linux
+        # jiffy quantisation to inflate cpu_percent by 10-100x; deferring one sample
+        # eliminates those spikes without affecting steady-state accuracy.
+        established: Dict[int, Any] = {self._root_proc.pid: self._root_proc}
         live_pids: Dict[int, Any] = {self._root_proc.pid: self._root_proc}
         try:
             for child in self._root_proc.children(recursive=True):
@@ -186,6 +194,8 @@ class StageProfiler:
                         child.cpu_percent(interval=None)  # prime — first call always 0
                     except self._psutil_errors():
                         pass
+                else:
+                    established[pid] = self._proc_cache[pid]
                 live_pids[pid] = self._proc_cache[pid]
         except self._psutil_errors():
             pass
@@ -193,7 +203,7 @@ class StageProfiler:
         for pid in list(self._proc_cache):
             if pid not in live_pids:
                 del self._proc_cache[pid]
-        return list(live_pids.values())
+        return list(established.values())
 
     def _prime_cpu_counters(self) -> None:
         self._psutil.cpu_percent(interval=None)
