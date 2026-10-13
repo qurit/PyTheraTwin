@@ -67,6 +67,7 @@ from src.io.rerun_guard import (
     synthetic_lesions_enabled,
 )
 from src.tests.validate_config import validate_config
+from src.utils.simind_runtime_utils import migrate_legacy_organ_totals
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent.parent.resolve()
@@ -346,9 +347,22 @@ class ScanRequest(BaseModel):
     path: str
 
 
+def _normalize_user_path(path: str) -> Path:
+    """Return an absolute path for a user-typed path (strips whitespace/quotes, expands ~).
+
+    Relative paths are resolved against the repo root, which is also the cwd that
+    run_server.py launches main.py from.  The pipeline receives CT inputs via a
+    symlink in a temp dir, so the target must be absolute or the link dangles.
+    """
+    p = Path(path.strip().strip("'\"")).expanduser()
+    if not p.is_absolute():
+        p = REPO_ROOT / p
+    return Path(os.path.abspath(p))
+
+
 def _discover_patients(ct_dir: str) -> List[Dict]:
     """Mirror main.py's CT discovery logic exactly."""
-    p = Path(ct_dir)
+    p = _normalize_user_path(ct_dir)
     if not p.exists():
         raise ValueError(f"Path does not exist: {ct_dir}")
     if not p.is_dir():
@@ -381,7 +395,8 @@ def _discover_patients(ct_dir: str) -> List[Dict]:
 async def scan_directory(req: ScanRequest) -> Dict:
     try:
         loop = asyncio.get_running_loop()
-        patients = await loop.run_in_executor(None, _discover_patients, req.path)
+        ct_dir = str(_normalize_user_path(req.path))
+        patients = await loop.run_in_executor(None, _discover_patients, ct_dir)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if not patients:
@@ -390,7 +405,7 @@ async def scan_directory(req: ScanRequest) -> Dict:
             "No patient CTs found. The directory must contain .nii / .nii.gz files "
             "or subdirectories (treated as DICOM series).",
         )
-    return {"patients": patients, "count": len(patients), "path": req.path}
+    return {"patients": patients, "count": len(patients), "path": ct_dir}
 
 
 # ── Native folder picker ───────────────────────────────────────────────────────
@@ -825,7 +840,8 @@ def _validate_patient_rerun(
         simind_prefix = simind_cfg["file_prefix"]
         simind_stage_dir = phase2_dir / simind_cfg.get("sub_dir_name", "simind_simulation")
         simind_pre = simind_stage_dir / "preprocess"
-        simind_work = simind_stage_dir / "work_dir"
+        simind_projections = simind_stage_dir / "projections"
+        migrate_legacy_organ_totals(str(simind_stage_dir / "work_dir"), str(simind_projections), simind_prefix)
         simind_snapshot = build_simind_rerun_snapshot(config_full, synthetic_enabled=synthetic_enabled)
         simind_markers = [
             simind_pre / f"{simind_prefix}_preprocess_meta.json",
@@ -840,9 +856,9 @@ def _validate_patient_rerun(
         for roi_name in ["remaining_body", *simind_snapshot["resolved_roi_subset"]]:
             simind_markers.extend(
                 [
-                    simind_work / f"{simind_prefix}_{roi_name}_tot_w1.a00",
-                    simind_work / f"{simind_prefix}_{roi_name}_tot_w2.a00",
-                    simind_work / f"{simind_prefix}_{roi_name}_tot_w3.a00",
+                    simind_projections / f"{simind_prefix}_{roi_name}_tot_w1.a00",
+                    simind_projections / f"{simind_prefix}_{roi_name}_tot_w2.a00",
+                    simind_projections / f"{simind_prefix}_{roi_name}_tot_w3.a00",
                 ]
             )
         simind_deps = {
@@ -1487,7 +1503,7 @@ async def start_run(req: RunRequest) -> Dict:
         if not out_dir.is_dir():
             raise HTTPException(400, f"Output directory for {nm!r} not found: {out_dir}")
 
-        ct_path = Path(patient["path"])
+        ct_path = _normalize_user_path(patient["path"])
         if not ct_path.exists():
             candidate = out_dir / ct_path.name
             if candidate.exists():
@@ -1502,7 +1518,7 @@ async def start_run(req: RunRequest) -> Dict:
 
         tmp_ct_dir = tempfile.mkdtemp(prefix="pytheratwin_ct_")
         # Use "00001_" prefix so the pipeline assigns CT_1 to this patient.
-        os.symlink(str(ct_path), os.path.join(tmp_ct_dir, f"00001_{ct_path.name}"))
+        os.symlink(str(ct_path.resolve()), os.path.join(tmp_ct_dir, f"00001_{ct_path.name}"))
 
         flag_args: List[str] = []
         for key, cli_flag in flag_cli_map.items():

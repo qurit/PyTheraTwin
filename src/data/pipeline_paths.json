@@ -1,8 +1,8 @@
 {
   "input_paths": {
     "label_map_path": "src/data/pipeline_roi_naming_map.json",
-    "SIMINDDirectory": ""
-  },
+    "SIMINDDirectory": "/home/jhubadmin/simind/simind"
+  },  
   "phase_1": {
     "sub_dir_name": "digital_twin",
     "segmentation_stage": {

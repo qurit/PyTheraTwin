@@ -601,6 +601,22 @@ def validate_config(
                 f"SIMINDDirectory does not exist: {simind_dir!r} "
                 "(set in src/data/pipeline_paths.json → input_paths.SIMINDDirectory)"
             )
+        else:
+            # Check the folder SIMIND actually runs from, so a wrong (e.g. parent)
+            # directory fails here instead of after Phase 1 has finished.
+            simind_exe = os.path.join(simind_dir, "simind")
+            if not (os.path.isfile(simind_exe) or os.path.isfile(simind_exe + ".exe")):
+                _err(
+                    f"SIMIND executable not found in SIMINDDirectory: {simind_exe!r}. "
+                    "SIMINDDirectory must be the folder containing the 'simind' "
+                    "executable and 'smc_dir' (set in src/data/pipeline_paths.json)."
+                )
+            if not os.path.isdir(os.path.join(simind_dir, "smc_dir")):
+                _err(
+                    f"'smc_dir' not found in SIMINDDirectory: {simind_dir!r}. "
+                    "SIMINDDirectory must be the folder containing the 'simind' "
+                    "executable and 'smc_dir' (set in src/data/pipeline_paths.json)."
+                )
 
         # roi_subset must be a subset of the segmentation roi_subset AND PBPK-compatible.
         # Synthetic lesion source labels are resolved internally from lesion host ROIs.

@@ -32,3 +32,9 @@ paper_dataset*
 /src/data/pipeline_paths.json
 
 /.claude*
+
+/figures/manuscript/*
+/figures/supplementary/*
+
+PyTheraTwin_JNM_Figures.ipynb
+PyTheraTwin_Paper_Figures.ipynb

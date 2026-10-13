@@ -84,12 +84,29 @@ def build_projection_path_dict(base_dir: str, prefix: str, roi_list: Sequence[st
     }
 
 
-def organ_totals_exist(work_dir: str, prefix: str, organ_name: str) -> bool:
+def organ_totals_exist(projection_dir: str, prefix: str, organ_name: str) -> bool:
     """Return True if all three energy window total files exist for this organ."""
     return all(
         os.path.exists(path)
-        for path in get_projection_paths_for_organ(work_dir, prefix, organ_name).values()
+        for path in get_projection_paths_for_organ(projection_dir, prefix, organ_name).values()
     )
+
+
+def migrate_legacy_organ_totals(work_dir: str, projection_dir: str, prefix: str) -> None:
+    """Move per-organ totals written by older versions from work_dir into projection_dir."""
+    if not os.path.isdir(work_dir):
+        return
+    suffixes = ("_tot_w1.a00", "_tot_w2.a00", "_tot_w3.a00")
+    for name in os.listdir(work_dir):
+        if not name.startswith(f"{prefix}_") or not name.endswith(suffixes):
+            continue
+        # Per-core files are "<prefix>_<organ>_<core_id>_tot_wN.a00"; only organ totals move.
+        if name.rsplit("_tot_", 1)[0].rsplit("_", 1)[-1].isdigit():
+            continue
+        dst = os.path.join(projection_dir, name)
+        if not os.path.exists(dst):
+            os.makedirs(projection_dir, exist_ok=True)
+            shutil.move(os.path.join(work_dir, name), dst)
 
 
 def organ_headers_exist(work_dir: str, prefix: str, organ_name: str) -> bool:
@@ -218,13 +235,18 @@ def build_simind_switches(
 
 def aggregate_core_projection_totals(
     work_dir: str,
+    projection_dir: str,
     prefix: str,
     organ_name: str,
     *,
     num_cpu: int,
     mode: str,
 ) -> None:
-    """Average projection totals across SIMIND runs and write organ-level totals."""
+    """Average per-core projection totals in work_dir and write organ totals to projection_dir.
+
+    projection_dir must survive PRODUCTION cleanup: SPECT reconstruction needs the
+    per-organ totals, while work_dir is deleted at the end of a PRODUCTION run.
+    """
     xtot_w1 = xtot_w2 = xtot_w3 = 0.0
 
     for core_id in range(num_cpu):
@@ -247,7 +269,7 @@ def aggregate_core_projection_totals(
     xtot_w2 /= num_cpu
     xtot_w3 /= num_cpu
 
-    organ_paths = get_projection_paths_for_organ(work_dir, prefix, organ_name)
+    organ_paths = get_projection_paths_for_organ(projection_dir, prefix, organ_name)
     np.asarray(xtot_w1, dtype=np.float32).tofile(organ_paths["w1"])
     np.asarray(xtot_w2, dtype=np.float32).tofile(organ_paths["w2"])
     np.asarray(xtot_w3, dtype=np.float32).tofile(organ_paths["w3"])
@@ -271,7 +293,7 @@ def copy_simind_headers_to_dir(work_dir: str, header_dir: str, prefix: str, firs
 
 
 def sum_projections_across_organs(
-    work_dir: str,
+    projection_dir: str,
     output_dir: str,
     prefix: str,
     roi_list: Sequence[str],
@@ -283,7 +305,7 @@ def sum_projections_across_organs(
 
     sum_w1 = sum_w2 = sum_w3 = None
     for organ_name in roi_list:
-        organ_paths = get_projection_paths_for_organ(work_dir, prefix, organ_name)
+        organ_paths = get_projection_paths_for_organ(projection_dir, prefix, organ_name)
         w1 = np.fromfile(organ_paths["w1"], dtype=np.float32)
         w2 = np.fromfile(organ_paths["w2"], dtype=np.float32)
         w3 = np.fromfile(organ_paths["w3"], dtype=np.float32)

@@ -81,6 +81,7 @@ from src.utils.simind_runtime_utils import (
     get_projection_paths_for_organ,
     get_summed_projection_paths,
     hu_to_mu,
+    migrate_legacy_organ_totals,
     organ_headers_exist,
     organ_totals_exist,
     run_jaszczak_calibration,
@@ -437,6 +438,10 @@ class SimindSimulationStage:
         self.header_dir: str = os.path.join(self.stage_output_dir, "headers")
         os.makedirs(self.header_dir, exist_ok=True)
 
+        # Per-organ projection totals (survive PRODUCTION cleanup; needed for reconstruction)
+        self.projection_dir: str = os.path.join(self.stage_output_dir, "projections")
+        os.makedirs(self.projection_dir, exist_ok=True)
+
         self.metadata_path: str = stage_metadata_path(context.output_folder_path, "simind_simulation_stage")
         self.calibration_path: str = os.path.join(self.output_dir, "calib.res")
 
@@ -593,7 +598,7 @@ class SimindSimulationStage:
 
         marker_rois = cached_roi_list or ["remaining_body", *self.simind_roi_subset]
         for organ_name in marker_rois:
-            markers.extend(get_projection_paths_for_organ(self.work_dir, self.prefix, organ_name).values())
+            markers.extend(get_projection_paths_for_organ(self.projection_dir, self.prefix, organ_name).values())
         return markers
 
     def _run_simind_for_organ_cores(self, organ_name: str, simind_switches: str) -> None:
@@ -645,6 +650,7 @@ class SimindSimulationStage:
             "summed_projection_paths": summed_projection_paths,
             "calibration_path": self.calibration_path,
             "header_dir": self.header_dir,
+            "projection_dir": self.projection_dir,
             "preprocess_dir": self.preprocess_dir,
         }
         skipped_zero_voxel_rois = [
@@ -659,6 +665,7 @@ class SimindSimulationStage:
             "work_dir": self.work_dir,
             "preprocess_dir": self.preprocess_dir,
             "header_dir": self.header_dir,
+            "projection_dir": self.projection_dir,
             "file_prefix": self.prefix,
             "simind_exe": self.simind_exe,
             "simind_dir": self.simind_dir,
@@ -714,6 +721,8 @@ class SimindSimulationStage:
         if self.debug:
             print(f"[SimindSimulationStage] Running preprocessing with xyz_spacing_mm={self.xyz_spacing_mm}")
 
+        migrate_legacy_organ_totals(self.work_dir, self.projection_dir, self.prefix)
+
         assert_stage_rerun_safe(
             stage_name="simind_simulation_stage",
             metadata_path=self.metadata_path,
@@ -738,13 +747,13 @@ class SimindSimulationStage:
             ]
             cached_projection_paths = meta.get("simind_projection_paths", {})
             if cached_roi_list and isinstance(cached_projection_paths, dict):
-                self.context.simind_projection_paths = {
-                    roi: cached_projection_paths[roi]
-                    for roi in cached_roi_list
-                    if roi in cached_projection_paths
-                }
+                cached_rois = [roi for roi in cached_roi_list if roi in cached_projection_paths]
             else:
-                self.context.simind_projection_paths = cached_projection_paths
+                cached_rois = list(cached_projection_paths or {})
+            # Rebuild from projection_dir: older metadata points into work_dir.
+            self.context.simind_projection_paths = build_projection_path_dict(
+                self.projection_dir, self.prefix, cached_rois
+            )
             self.context.simind_summed_projection_paths = meta.get("summed_projection_paths", {})
             self.context.simind_num_cpu = self.num_cpu
             self.context.simind_geometry = meta.get("geometry")
@@ -841,7 +850,7 @@ class SimindSimulationStage:
         if not roi_list:
             raise ValueError("No ROI binary source maps found for SIMIND simulation.")
 
-        simind_projection_paths = build_projection_path_dict(self.work_dir, self.prefix, roi_list)
+        simind_projection_paths = build_projection_path_dict(self.projection_dir, self.prefix, roi_list)
         geometry = derive_input_geometry(
             arr_shape,
             arr_px_spacing_cm,
@@ -898,7 +907,7 @@ class SimindSimulationStage:
             )
             simind_switches_by_organ[organ_name] = simind_switches
 
-            if organ_totals_exist(self.work_dir, self.prefix, organ_name) and organ_headers_exist(self.work_dir, self.prefix, organ_name):
+            if organ_totals_exist(self.projection_dir, self.prefix, organ_name) and organ_headers_exist(self.work_dir, self.prefix, organ_name):
                 if self.debug:
                     print(f"[SimindSimulationStage] Organ '{organ_name}' projections already exist, skipping.")
                 continue
@@ -908,6 +917,7 @@ class SimindSimulationStage:
             self._run_simind_for_organ_cores(organ_name, simind_switches)
             aggregate_core_projection_totals(
                 self.work_dir,
+                self.projection_dir,
                 self.prefix,
                 organ_name,
                 num_cpu=self.num_cpu,
@@ -923,7 +933,7 @@ class SimindSimulationStage:
         )
         copy_simind_headers_to_dir(self.work_dir, self.header_dir, self.prefix, roi_list[0])
         summed_projection_paths = sum_projections_across_organs(
-            self.work_dir,
+            self.projection_dir,
             self.output_dir,
             self.prefix,
             roi_list,
